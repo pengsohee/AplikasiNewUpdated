@@ -20,6 +20,7 @@ public class DataService(IConfiguration config)
 #pragma warning disable CS8604 // Possible null reference argument.
     private readonly byte[] _iv = Encoding.UTF8.GetBytes(config["EncryptionIV"]);
 #pragma warning restore CS8604 // Possible null reference argument.
+    private readonly List<string> _encryptedFields = config.GetSection("EncryptionFields").Get<List<string>>() ?? new List<string>();
 
     private string Encrypt(string plainText)
     {
@@ -99,9 +100,18 @@ public class DataService(IConfiguration config)
 
         foreach (var user in users)
         {
-            user.Email = IsEncrypted(user.Email) ? user.Email : Encrypt(user.Email);
-            user.Password = IsEncrypted(user.Password) ? user.Password : Encrypt(user.Password);
-            user.CreditCardToken = string.IsNullOrEmpty(user.CreditCardToken) ? "N/A" : (IsEncrypted(user.CreditCardToken) ? user.CreditCardToken : Encrypt(user.CreditCardToken));
+            foreach (var field in _encryptedFields)
+            {
+                var property = typeof(UserData).GetProperty(field, System.Reflection.BindingFlags.IgnoreCase | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (property != null)
+                {
+                    var value = property.GetValue(user)?.ToString();
+                    if (!string.IsNullOrEmpty(value) && !IsEncrypted(value))
+                    {
+                        property.SetValue(user, Encrypt(value));
+                    }
+                }
+            }
 
             var existing = await targetConn.QueryFirstOrDefaultAsync<int?>(
                 "SELECT id FROM new_app WHERE id = @Id", new { user.Id });
@@ -129,13 +139,32 @@ public class DataService(IConfiguration config)
     public async Task<IEnumerable<UserData>> DetokenizeData()
     {
         var data = await GetData();
-        return data.Select(user => new UserData
+        return data.Select(user =>
         {
-            Id = user.Id,
-            Username = user.Username,
-            Email = IsEncrypted(user.Email) ? Decrypt(user.Email) : user.Email,
-            Password = IsEncrypted(user.Password) ? Decrypt(user.Password) : user.Password,
-            CreditCardToken = string.IsNullOrEmpty(user.CreditCardToken) ? "N/A" : (IsEncrypted(user.CreditCardToken) ? user.CreditCardToken : Encrypt(user.CreditCardToken))
+            var newUser = new UserData
+            {
+                Id = user.Id,
+                Username = user.Username
+            };
+
+            foreach (var field in _encryptedFields)
+            {
+                var property = typeof(UserData).GetProperty(field, System.Reflection.BindingFlags.IgnoreCase | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (property != null)
+                {
+                    var value = property.GetValue(user)?.ToString();
+                    if (!string.IsNullOrEmpty(value) && IsEncrypted(value))
+                    {
+                        property.SetValue(newUser, Decrypt(value));
+                    }
+                    else
+                    {
+                        property.SetValue(newUser, value);
+                    }
+                }
+            }
+
+            return newUser;
         });
     }
 }
