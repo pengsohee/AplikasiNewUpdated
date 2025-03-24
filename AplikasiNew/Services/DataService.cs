@@ -135,7 +135,7 @@ public class DataService(IConfiguration config)
             Username = user.Username,
             Email = IsEncrypted(user.Email) ? Decrypt(user.Email) : user.Email,
             Password = IsEncrypted(user.Password) ? Decrypt(user.Password) : user.Password,
-            CreditCardToken = IsEncrypted(user.CreditCardToken) ? Decrypt(user.CreditCardToken) : user.CreditCardToken
+            CreditCardToken = string.IsNullOrEmpty(user.CreditCardToken) ? "N/A" : (IsEncrypted(user.CreditCardToken) ? user.CreditCardToken : Encrypt(user.CreditCardToken))
         });
     }
 }
