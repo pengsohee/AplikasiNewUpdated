@@ -17,14 +17,16 @@ public class DataController : ControllerBase
     public class SubmitRequest
     {
         public string TokenGroup { get; set; }
-        public string Source { get; set; }
-    }
-
-    public class TempSubmitRequest
-    {
-        public string TokenGroup { get; set; }
+        public string SourceConnectionString { get; set; }
         public string SourceTable { get; set; }
         public List<string> Columns { get; set; }
+    }
+
+    public class BackupRequest
+    {
+        public string TokenGroup { get; set; }
+        public string SourceConnectionString { get; set; }
+        public string SourceTable { get; set; }
     }
 
     public class TransferTableRequest
@@ -36,38 +38,19 @@ public class DataController : ControllerBase
         public List<string> Columns { get; set; }
     }
 
-    [HttpPost("submit")]
-    public async Task<IActionResult> Submit([FromBody] SubmitRequest request)
+    [HttpPost("backup-table")]
+    public async Task<IActionResult> BackupTable([FromBody] BackupRequest request)
     {
-        if (string.IsNullOrEmpty(request.TokenGroup) || string.IsNullOrEmpty(request.Source))
+        if (string.IsNullOrEmpty(request.TokenGroup) || string.IsNullOrEmpty(request.SourceTable))
         {
             return BadRequest(new { error = "Token group and source are required" });
         }
 
-        if (request.Source != "users" && request.Source != "nosecurity_db")
-        {
-            return BadRequest(new { error = "Invalid source provided" });
-        }
-
-        await _dataService.TransferData(request.Source);
-        return Ok(new { message = "Data successfully transferred!" });
+        await _dataService.BackupTable(request.SourceConnectionString, request.SourceTable);
+        return Ok(new { message = "Backup table created" });
     }
 
-    [HttpGet("get-data")]
-    public async Task<IActionResult> GetData()
-    {
-        var data = await _dataService.GetData();
-        return Ok(data);
-    }
-
-    [HttpPost("detokenize")]
-    public async Task<IActionResult> Detokenize()
-    {
-        var data = await _dataService.DetokenizeData();
-        return Ok(data);
-    }
-
-    [HttpPost("transfer")]
+    [HttpPost("transfer-database")]
     public async Task<IActionResult> TransferTable([FromBody] TransferTableRequest request)
     {
         if (request == null ||
@@ -84,43 +67,57 @@ public class DataController : ControllerBase
     }
 
     [HttpPut("tokenize-table")]
-    public async Task<IActionResult> TokenizeTable([FromBody] TempSubmitRequest request)
+    public async Task<IActionResult> TokenizeTable([FromBody] SubmitRequest request)
     {
         if (string.IsNullOrEmpty(request.TokenGroup) || string.IsNullOrEmpty(request.SourceTable) || request.Columns == null)
         {
             return BadRequest(new { error = "Token group and source are required" });
         }
 
-        await _dataService.TokenizeTable(request.SourceTable, request.Columns);
+        await _dataService.TokenizeTable(request.SourceConnectionString, request.SourceTable, request.Columns);
         return Ok(new { message = "Data successfully tokenized!" });
     }
 
     [HttpPut("detokenize-table")]
-    public async Task<IActionResult> DetokenizeTable([FromBody] TempSubmitRequest request)
+    public async Task<IActionResult> DetokenizeTable([FromBody] SubmitRequest request)
     {
         if (string.IsNullOrEmpty(request.TokenGroup) || string.IsNullOrEmpty(request.SourceTable))
         {
             return BadRequest(new { error = "Token group and source are required" });
         }
 
-        await _dataService.DetokenizeTable(request.SourceTable, request.Columns);
+        await _dataService.DetokenizeTable(request.SourceConnectionString,request.SourceTable, request.Columns);
         return Ok(new { message = "Data successfully detokenized!" });
     }
 
-    [HttpPost("backup-table")]
-    public async Task<IActionResult> BackupTable([FromBody] SubmitRequest request)
-    {
-        if (string.IsNullOrEmpty(request.TokenGroup) || string.IsNullOrEmpty(request.Source))
-        {
-            return BadRequest(new { error = "Token group and source are required" });
-        }
+    //[HttpPost("submit")]
+    //public async Task<IActionResult> Submit([FromBody] SubmitRequest request)
+    //{
+    //    if (string.IsNullOrEmpty(request.TokenGroup) || string.IsNullOrEmpty(request.Source))
+    //    {
+    //        return BadRequest(new { error = "Token group and source are required" });
+    //    }
 
-        if (request.Source != "insecure_users")
-        {
-            return BadRequest(new { error = "Invalid source provided" });
-        }
+    //    if (request.Source != "users" && request.Source != "nosecurity_db")
+    //    {
+    //        return BadRequest(new { error = "Invalid source provided" });
+    //    }
 
-        await _dataService.BackupTable(request.Source);
-        return Ok(new { message = "Backup table created" });
-    }
+    //    await _dataService.TransferData(request.Source);
+    //    return Ok(new { message = "Data successfully transferred!" });
+    //}
+
+    //[HttpGet("get-data")]
+    //public async Task<IActionResult> GetData()
+    //{
+    //    var data = await _dataService.GetData();
+    //    return Ok(data);
+    //}
+
+    //[HttpPost("detokenize")]
+    //public async Task<IActionResult> Detokenize()
+    //{
+    //    var data = await _dataService.DetokenizeData();
+    //    return Ok(data);
+    //}
 }

@@ -101,46 +101,7 @@ public class DataService(IConfiguration config)
         return count > 0;
     }
 
-    public async Task TransferData(string sourceTable)
-    {
-        using var sourceConn = new NpgsqlConnection(_sourceDb);
-        using var targetConn = new NpgsqlConnection(_targetDb);
-
-        var users = await sourceConn.QueryAsync<UserData>($"SELECT id, username, email, password, credit_card_token FROM {sourceTable}");
-
-        foreach (var user in users)
-        {
-            foreach (var field in _encryptedFields)
-            {
-                var property = typeof(UserData).GetProperty(field, System.Reflection.BindingFlags.IgnoreCase | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-                if (property != null)
-                {
-                    var value = property.GetValue(user)?.ToString();
-                    if (!string.IsNullOrEmpty(value) && !IsEncrypted(value))
-                    {
-                        property.SetValue(user, Encrypt(value));
-                    }
-                }
-            }
-
-            var existing = await targetConn.QueryFirstOrDefaultAsync<int?>(
-                "SELECT id FROM new_app WHERE id = @Id", new { user.Id });
-
-            if (existing == null)
-            {
-                await targetConn.ExecuteAsync(
-                    "INSERT INTO new_app (id, username, email, password, credit_card_token) VALUES (@Id, @Username, @Email, @Password, @CreditCardToken)",
-                    user
-                );
-            }
-            else
-            {
-                Console.WriteLine($"User with ID {user.Id} already exists. Skipping insertion.");
-            }
-        }
-    }
-
-    // Transfer data to other table
+    // Transfer data to other table (tokenization)
     public async Task TransferTable(string SourceConnection, string TargetConnection, string SourceTable, string TargetTable, List<string> Columns)
     {
         using var sourceConn = new NpgsqlConnection(SourceConnection);
@@ -149,12 +110,14 @@ public class DataService(IConfiguration config)
         var selectQuery = $"SELECT * FROM {SourceTable}";
         var sourceData = await sourceConn.QueryAsync<dynamic>(selectQuery);
 
+        // creates an empty list
         var processedRows = new List<dynamic>();
         foreach (var row in sourceData)
         {
+            // extract row to dictionary
             var rowDict = row as IDictionary<string, object>;
             if (rowDict == null)
-                continue;
+                continue; // skips to next iteration
 
             foreach (var field in Columns)
             {
@@ -170,8 +133,10 @@ public class DataService(IConfiguration config)
             processedRows.Add(rowDict);
         }
 
+        // insert each row from processedRows to the target table
         foreach (var row in processedRows)
         {
+            // extract row to the dictionary
             var dict = row as IDictionary<string, object>;
             if (dict == null || dict.Count == 0)
                 continue;
@@ -185,9 +150,9 @@ public class DataService(IConfiguration config)
     }
 
     // Backup table
-    public async Task BackupTable(string sourceTable, string schema = "public")
+    public async Task BackupTable(string sourceConnection, string sourceTable, string schema = "public")
     {
-        using var sourceConn = new NpgsqlConnection(_sourceDb);
+        using var sourceConn = new NpgsqlConnection(sourceConnection);
         string backupTable = sourceTable + "_backup";
 
         // Check if backup database exist
@@ -216,7 +181,7 @@ public class DataService(IConfiguration config)
     }
 
     // Tokenize table with selected columns
-    public async Task TokenizeTable(string sourceTable, List<string> columns)
+    public async Task TokenizeTable(string sourceConnection, string sourceTable, List<string> columns)
     {
         // Ensure the "id" column is always present for update reference.
         if (!columns.Any(c => string.Equals(c, "id", StringComparison.OrdinalIgnoreCase)))
@@ -224,7 +189,7 @@ public class DataService(IConfiguration config)
             columns.Add("id");
         }
 
-        using var sourceConn = new NpgsqlConnection(_sourceDb);
+        using var sourceConn = new NpgsqlConnection(sourceConnection);
 
         var selectedColumns = string.Join(", ", columns);
         Console.WriteLine($"The selected columns are {selectedColumns}");
@@ -262,19 +227,19 @@ public class DataService(IConfiguration config)
             {
                 Console.WriteLine($"Duplicate key error while updating user. Details: {ex.Message}");
             }
-            
+
         }
     }
 
     // Detokenize whole table
-    public async Task DetokenizeTable(string sourceTable, List<string> columns)
+    public async Task DetokenizeTable(string sourceConnection, string sourceTable, List<string> columns)
     {
         if (!columns.Any(c => string.Equals(c, "id", StringComparison.OrdinalIgnoreCase)))
         {
             columns.Add("id");
         }
 
-        using var sourceConn = new NpgsqlConnection(_sourceDb);
+        using var sourceConn = new NpgsqlConnection(sourceConnection);
 
         var selectedColumns = string.Join(", ", columns);
         Console.WriteLine($"The selected columns are {selectedColumns}");
@@ -313,42 +278,83 @@ public class DataService(IConfiguration config)
         }
     }
 
-    public async Task<IEnumerable<UserData>> GetData()
-    {
-        using var targetConn = new NpgsqlConnection(_targetDb);
-        return await targetConn.QueryAsync<UserData>("SELECT id, username, email, password, credit_card_token FROM new_app");
+    //public async Task TransferData(string sourceTable)
+    //{
+    //    using var sourceConn = new NpgsqlConnection(_sourceDb);
+    //    using var targetConn = new NpgsqlConnection(_targetDb);
 
-    }
+    //    var users = await sourceConn.QueryAsync<UserData>($"SELECT id, username, email, password, credit_card_token FROM {sourceTable}");
 
-    public async Task<IEnumerable<UserData>> DetokenizeData()
-    {
-        var data = await GetData();
-        return data.Select(user =>
-        {
-            var newUser = new UserData
-            {
-                Id = user.Id,
-                Username = user.Username
-            };
+    //    foreach (var user in users)
+    //    {
+    //        foreach (var field in _encryptedFields)
+    //        {
+    //            var property = typeof(UserData).GetProperty(field, System.Reflection.BindingFlags.IgnoreCase | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+    //            if (property != null)
+    //            {
+    //                var value = property.GetValue(user)?.ToString();
+    //                if (!string.IsNullOrEmpty(value) && !IsEncrypted(value))
+    //                {
+    //                    property.SetValue(user, Encrypt(value));
+    //                }
+    //            }
+    //        }
 
-            foreach (var field in _encryptedFields)
-            {
-                var property = typeof(UserData).GetProperty(field, System.Reflection.BindingFlags.IgnoreCase | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-                if (property != null)
-                {
-                    var value = property.GetValue(user)?.ToString();
-                    if (!string.IsNullOrEmpty(value) && IsEncrypted(value))
-                    {
-                        property.SetValue(newUser, Decrypt(value));
-                    }
-                    else
-                    {
-                        property.SetValue(newUser, value);
-                    }
-                }
-            }
+    //        var existing = await targetConn.QueryFirstOrDefaultAsync<int?>(
+    //            "SELECT id FROM new_app WHERE id = @Id", new { user.Id });
 
-            return newUser;
-        });
-    }
+    //        if (existing == null)
+    //        {
+    //            await targetConn.ExecuteAsync(
+    //                "INSERT INTO new_app (id, username, email, password, credit_card_token) VALUES (@Id, @Username, @Email, @Password, @CreditCardToken)",
+    //                user
+    //            );
+    //        }
+    //        else
+    //        {
+    //            Console.WriteLine($"User with ID {user.Id} already exists. Skipping insertion.");
+    //        }
+    //    }
+    //}
+
+
+
+    //public async Task<IEnumerable<UserData>> GetData()
+    //{
+    //    using var targetConn = new NpgsqlConnection(_targetDb);
+    //    return await targetConn.QueryAsync<UserData>("SELECT id, username, email, password, credit_card_token FROM new_app");
+
+    //}
+
+    //public async Task<IEnumerable<UserData>> DetokenizeData()
+    //{
+    //    var data = await GetData();
+    //    return data.Select(user =>
+    //    {
+    //        var newUser = new UserData
+    //        {
+    //            Id = user.Id,
+    //            Username = user.Username
+    //        };
+
+    //        foreach (var field in _encryptedFields)
+    //        {
+    //            var property = typeof(UserData).GetProperty(field, System.Reflection.BindingFlags.IgnoreCase | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+    //            if (property != null)
+    //            {
+    //                var value = property.GetValue(user)?.ToString();
+    //                if (!string.IsNullOrEmpty(value) && IsEncrypted(value))
+    //                {
+    //                    property.SetValue(newUser, Decrypt(value));
+    //                }
+    //                else
+    //                {
+    //                    property.SetValue(newUser, value);
+    //                }
+    //            }
+    //        }
+
+    //        return newUser;
+    //    });
+    //}
 }
