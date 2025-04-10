@@ -90,6 +90,12 @@ public class DataController : ControllerBase
         return Ok(new { message = "Data successfully detokenized!" });
     }
 
+    [HttpGet("simulate-unhandled-error")]
+    public IActionResult SimulateUnhandled()
+    {
+        throw new Exception("This is a simulated unhandled error.");
+    }
+
     //[HttpPost("submit")]
     //public async Task<IActionResult> Submit([FromBody] SubmitRequest request)
     //{
