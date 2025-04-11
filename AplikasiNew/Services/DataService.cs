@@ -1,132 +1,132 @@
 ﻿using System.Linq.Expressions;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using AplikasiNew.Exceptions;
 using AplikasiNew.Models;
 using Dapper;
+using DotNetEnv;
 using Microsoft.AspNetCore.Components.Server;
 using Microsoft.AspNetCore.Http.HttpResults;
+using Microsoft.Extensions.Logging;
 using Npgsql;
+using static System.Runtime.InteropServices.JavaScript.JSType;
+using static Microsoft.EntityFrameworkCore.DbLoggerCategory;
 
 namespace AplikasiNew.Services;
 
-public class DataService(IConfiguration config)
+public class DataService
 {
-#pragma warning disable CS8604 // Possible null reference argument.
-    private readonly byte[] _key = Encoding.UTF8.GetBytes(config["EncryptionKey"]);
-#pragma warning restore CS8604 // Possible null reference argument.
-#pragma warning disable CS8604 // Possible null reference argument.
-    private readonly byte[] _iv = Encoding.UTF8.GetBytes(config["EncryptionIV"]);
-#pragma warning restore CS8604 // Possible null reference argument.
-    private readonly List<string> _encryptedFields = config.GetSection("EncryptionFields").Get<List<string>>() ?? new List<string>();
-    //private bool IsEncrypted(string data)
-    //{
-    //    return data.Contains(":");
-    //}
-    //private string Encrypt(string plainText)
-    //{
-    //    if (string.IsNullOrEmpty(plainText))
-    //        return plainText;
-
-    //    int lengthToEncrypt = (int)Math.Ceiling(plainText.Length * 0.6);
-    //    string partToEncrypt = plainText.Substring(0, lengthToEncrypt);
-    //    string remainingPart = plainText.Substring(lengthToEncrypt);
-
-    //    using (Aes aes = Aes.Create())
-    //    {
-    //        aes.Key = _key;
-    //        aes.IV = _iv;
-    //        aes.Mode = CipherMode.CBC;
-    //        aes.Padding = PaddingMode.PKCS7;
-
-    //        using (var encryptor = aes.CreateEncryptor(aes.Key, aes.IV))
-    //        {
-    //            byte[] plainBytes = Encoding.UTF8.GetBytes(partToEncrypt);
-    //            byte[] encryptedBytes = encryptor.TransformFinalBlock(plainBytes, 0, plainBytes.Length);
-    //            string encryptedPart = Convert.ToBase64String(encryptedBytes);
-
-    //            return $"{encryptedPart}:{remainingPart}";
-    //        }
-    //    }
-    //}
-
-    //private string Decrypt(string encryptedText)
-    //{
-    //    if (string.IsNullOrEmpty(encryptedText))
-    //        return encryptedText;
-
-    //    string[] parts = encryptedText.Split(':');
-    //    if (parts.Length != 2)
-    //        return encryptedText;
-
-    //    string encryptedPart = parts[0];
-    //    string plainPart = parts[1];
-
-    //    try
-    //    {
-    //        using (Aes aes = Aes.Create())
-    //        {
-    //            aes.Key = _key;
-    //            aes.IV = _iv;
-    //            aes.Mode = CipherMode.CBC;
-    //            aes.Padding = PaddingMode.PKCS7;
-
-    //            using (var decryptor = aes.CreateDecryptor(aes.Key, aes.IV))
-    //            {
-    //                byte[] encryptedBytes = Convert.FromBase64String(encryptedPart);
-    //                byte[] decryptedBytes = decryptor.TransformFinalBlock(encryptedBytes, 0, encryptedBytes.Length);
-    //                string decryptedPart = Encoding.UTF8.GetString(decryptedBytes);
-
-    //                return decryptedPart + plainPart;
-    //            }
-    //        }
-    //    }
-    //    catch
-    //    {
-    //        return encryptedText;
-    //    }
-    //}
-
-    public void ValidateConnectionString(string connectionString)
+    private readonly IConfiguration _config;
+    private readonly IEncryptionService _encryptionService;
+    private readonly IValidationService _validationService;
+    private readonly List<string> _encryptedFields;
+    private readonly ILogger<DataService> _logger;
+    public DataService(IConfiguration config, IEncryptionService encryptionService,  IValidationService validationService, ILogger<DataService> logger)
     {
+        _config = config;
+        _encryptionService = encryptionService;
+        _validationService = validationService;
+        _encryptedFields = _config.GetSection("EncryptionFields").Get<List<string>>() ?? new List<string>();
+        _logger = logger;
+    }
+    #region Helper Method
+    private (string query, DynamicParameters parameters) BuildUpsertQuery(string targetTable,List<IDictionary<string, object>> dataRows, List<string> pkColumns)
+    {
+        if (dataRows.Count == 0) return (string.Empty, null);
+
+        // Get all column names from first row
+        var allColumns = dataRows.First().Keys.ToList();
+
+        // Build conflict target and update clause
+        var quotedPkColumns = pkColumns.Select(c => $"\"{c}\"");
+        var updateColumns = allColumns
+            .Except(pkColumns)
+            .Select(c => $"\"{c}\" = EXCLUDED.\"{c}\"");
+
+        // Build parameterized query
+        return ($@"
+        INSERT INTO ""{targetTable}"" 
+        ({string.Join(", ", allColumns.Select(c => $"\"{c}\""))})
+        VALUES ({string.Join(", ", allColumns.Select(c => $"@{c}"))})
+        ON CONFLICT ({string.Join(", ", quotedPkColumns)})
+        DO UPDATE SET {string.Join(", ", updateColumns)}
+        WHERE {string.Join(" AND ", pkColumns.Select(pk => $"\"{targetTable}\".\"{pk}\" = EXCLUDED.\"{pk}\""))}",
+            new DynamicParameters());
+    }
+
+    private async Task ExecuteBulkUpsertAsync(NpgsqlConnection connection, string query,List<IDictionary<string, object>> dataRows, List<string> pkColumns)
+    {
+        if (string.IsNullOrEmpty(query)) return;
+
         try
         {
-            var builder = new Npgsql.NpgsqlConnectionStringBuilder(connectionString);
-            using var connection = new Npgsql.NpgsqlConnection(connectionString);
-            connection.Open(); 
+            await connection.ExecuteAsync(query, dataRows);
+            _logger.LogInformation($"Upserted {dataRows.Count} rows successfully");
         }
-        // Invalid Authentication
-        catch (Npgsql.PostgresException ex) when (ex.SqlState == "28P01") 
+        catch (PostgresException ex) when (ex.SqlState.StartsWith("23"))
         {
-            throw new InvalidConnectionStringException("The provided connection can't reach the database because of authentication failure.");
+            throw new DataIntegrityViolationException("Data integrity violation during upsert operation", ex);
         }
-        // Network isues
-        catch (Npgsql.NpgsqlException ex) when (ex.InnerException is System.Net.Sockets.SocketException) 
+    }
+    private async Task<List<string>> GetPrimaryKeyColumnsAsync(NpgsqlConnection connection, string schema, string table)
+    {
+        var query = @"
+        SELECT a.attname
+        FROM pg_index i
+        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+        WHERE i.indrelid = @fullTableName::regclass
+          AND i.indisprimary";
+
+        var fullTableName = $"{schema}.{table}";
+        return (await connection.QueryAsync<string>(query, new { fullTableName })).ToList();
+    }
+    private async Task InsertOrUpdateDataAsync(NpgsqlConnection connection, string schema, string sourceTable, string backupTable)
+    {
+        // Get all columns from the source table
+        var columns = await GetTableColumnsAsync(connection, schema, sourceTable);
+        var columnsToUpdate = columns.Where(c => c != "id").Select(c => $"\"{c}\" = EXCLUDED.\"{c}\"").ToList();
+
+        // Build the ON CONFLICT SET clause
+        string setClause = string.Join(", ", columnsToUpdate);
+
+        string upsertQuery = $@"INSERT INTO ""{schema}"".""{backupTable}"" SELECT * FROM ""{schema}"".""{sourceTable}"" ON CONFLICT (id) DO UPDATE SET {setClause};";
+
+        try
         {
-            throw new DatabaseNetworkException("Network-related error occurred while establishing a connection.", ex);
+            await connection.ExecuteAsync(upsertQuery);
         }
-        // Invalid Connection String
-        catch (Exception ex)
+        catch (PostgresException ex) when (ex.SqlState.StartsWith("23"))
         {
-            throw new InvalidConnectionStringException("The provided connection string is invalid or cannot connect to the database.", ex);
+            throw new DataIntegrityViolationException("Data integrity violation during upsert.", ex);
         }
     }
 
-    public void ValidateTable(string connectionString)
+    private async Task<List<string>> GetTableColumnsAsync(NpgsqlConnection connection, string schema, string table)
     {
-        try
-        {
-            var builder = new Npgsql.NpgsqlConnectionStringBuilder(connectionString);
-            using var connection = new Npgsql.NpgsqlConnection(connectionString);
-            connection.Open();
-        }
-        // Table Issues
-        catch (Npgsql.PostgresException ex) when (ex.SqlState == "42P01")
-        {
-            throw new InvalidTableException("The provided table does not exist.", ex);
-        }        
+        var query = @"
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_schema = @schema AND table_name = @table";
+        var columns = await connection.QueryAsync<string>(query, new { schema, table });
+        return columns.ToList();
     }
 
+    private async Task<bool> CheckPrimaryKeyExistsAsync(NpgsqlConnection connection, string schema, string table)
+    {
+        var query = @"
+        SELECT EXISTS (
+            SELECT 1 
+            FROM pg_constraint 
+            WHERE conrelid = @fullTableName::regclass 
+            AND contype = 'p'
+        );";
+        var fullTableName = $"{schema}.{table}";
+        return await connection.ExecuteScalarAsync<bool>(query, new { fullTableName });
+    } 
+    #endregion
+
+    #region Schema Handling
     public async Task<IEnumerable<DatabaseSchema>> GetTableSchemaAsync(NpgsqlConnection connection, string schema, string tableName)
     {
         string query = @"
@@ -175,6 +175,9 @@ public class DataService(IConfiguration config)
         }
     }
 
+    #endregion
+
+    #region Table Operations
     public async Task InsertRecordAsync(string connectionString, string query, object parameters)
     {
         using var connection = new NpgsqlConnection(connectionString);
@@ -195,22 +198,13 @@ public class DataService(IConfiguration config)
         }
     }
 
-    public async Task<bool> CheckTable(NpgsqlConnection conn, string sourceTable, string schema = "public")
-    {
-        string query = @"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = @schema AND table_name = @sourceTable";
-        Console.WriteLine($"schema: {schema}, sourceTable: {sourceTable}");
-        long count = await conn.ExecuteScalarAsync<long>(query, new { schema, sourceTable });
-        return count > 0;
-    }
-
-    // MAIN FUNCTION START
-
     // Transfer data to other table (tokenization)
     public async Task TransferTable(string sourceConnection, string targetConnection, string sourceTable, string targetTable, List<string> columns, int maxAllowedRows = 100000)
     {
         // Validate connection string
-        ValidateConnectionString(sourceConnection);
-        ValidateConnectionString(targetConnection);
+        _validationService.ValidateConnectionString(sourceConnection);
+        _validationService.ValidateConnectionString(targetConnection);
+
         using var sourceConn = new NpgsqlConnection(sourceConnection);
         using var targetConn = new NpgsqlConnection(targetConnection);
 
@@ -246,11 +240,11 @@ public class DataService(IConfiguration config)
                     if (rowDict.ContainsKey(field))
                     {
                         var value = rowDict[field]?.ToString();
-                        if (!string.IsNullOrEmpty(value) && !IsEncrypted(value))
+                        if (!string.IsNullOrEmpty(value) && !_encryptionService.IsEncrypted(value))
                         {
                             try
                             {
-                                rowDict[field] = Encrypt(value);
+                                rowDict[field] = _encryptionService.Encrypt(value);
                             }
                             catch (CryptographicException ex)
                             {
@@ -266,33 +260,29 @@ public class DataService(IConfiguration config)
         {
             throw new TransactionFailureException("An unexpected transaction failure occurred while transferring data", ex);
         }
-        
+
         // insert each row from processedRows to the target table
         try
         {
-            foreach (var row in processedRows)
-            {
-                // extract row to the dictionary
-                var dict = row as IDictionary<string, object>;
-                if (dict == null || dict.Count == 0)
-                    continue;
+            var pkColumns = await GetPrimaryKeyColumnsAsync(targetConn, "public", targetTable);
+            if (pkColumns.Count == 0)
+                throw new InvalidOperationException($"Target table {targetTable} has no primary key");
 
-                var col = string.Join(", ", dict.Keys);
-                var parameters = string.Join(", ", dict.Keys.Select(c => "@" + c));
-                var insertQuery = $"INSERT INTO {targetTable} ({col}) VALUES ({parameters})";
-                try
-                {
-                    await targetConn.ExecuteAsync(insertQuery, dict);
-                }
-                catch (PostgresException ex) when (ex.SqlState.StartsWith("23"))
-                {
-                    throw new DataIntegrityViolationException("Data integrity violation occured while insertin data into the target table", ex);
-                }
+            var dataRows = processedRows.Select(row => (IDictionary<string, object>)row).Where(dict => dict?.Count > 0).ToList();
+
+            foreach (var row in dataRows)
+            {
+                if (!pkColumns.All(pk => row.ContainsKey(pk)))
+                    throw new InvalidOperationException($"Missing primary key in row data: {string.Join(", ", pkColumns)}");
             }
+
+            var (upsertQuery, parameters) = BuildUpsertQuery(targetTable, dataRows, pkColumns);
+            await ExecuteBulkUpsertAsync(targetConn, upsertQuery, dataRows, pkColumns);
+
         }
         catch (Exception ex)
         {
-            throw new TransactionFailureException("An unexpected transaction failure occurred while transferring data", ex);
+            throw new TransactionFailureException("Transaction failure during data transfer", ex);
         }
     }
 
@@ -300,7 +290,7 @@ public class DataService(IConfiguration config)
     public async Task BackupTable(string sourceConnection, string sourceTable, string schema = "public", int maxAllowedRows = 100000)
     {
         // Validate connection string
-        ValidateConnectionString(sourceConnection);
+        _validationService.ValidateConnectionString(sourceConnection);
         using var sourceConn = new NpgsqlConnection(sourceConnection);
 
         // Check row count first to simulate large data volume handling
@@ -318,25 +308,22 @@ public class DataService(IConfiguration config)
             string backupTable = sourceTable + "_backup";
 
             // Check if backup database exist
-            bool exists = await CheckTable(sourceConn, backupTable);
-            Console.WriteLine($"The table {sourceTable}: {exists}"); // debug
+            bool exists = await _validationService.CheckTable(sourceConn, backupTable);
+            _logger.LogInformation($"The table {sourceTable}: {exists}"); // debug
 
             // Queries
-            string query = $@"CREATE TABLE IF NOT EXISTS ""{schema}"".""{backupTable}"" AS TABLE ""{schema}"".""{sourceTable}"" WITH NO DATA;";
-            string copyQuery = $@"INSERT INTO ""{schema}"".""{backupTable}"" SELECT * FROM ""{schema}"".""{sourceTable}"";";
-            string PKQuery = $@"ALTER TABLE ""{schema}"".""{backupTable}"" ADD PRIMARY KEY (id);";
+            string createQuery = $@"CREATE TABLE IF NOT EXISTS ""{schema}"".""{backupTable}"" AS TABLE ""{schema}"".""{sourceTable}"" WITH NO DATA;";
+            string pkQuery = $@"ALTER TABLE ""{schema}"".""{backupTable}"" ADD PRIMARY KEY (id);";
 
             if (!exists)
             {
-                Console.WriteLine($"The table {backupTable} doesn't exist. Creating...");
-                // create table
-                await sourceConn.ExecuteAsync(query);
+                _logger.LogInformation($"Creating backup table {backupTable}...");
+                await sourceConn.ExecuteAsync(createQuery);
 
-                // Inserting data to table
-                Console.WriteLine($"The table {backupTable} exists. Updating...");
+                _logger.LogInformation($"Copying data to {backupTable}...");
                 try
                 {
-                    await sourceConn.ExecuteAsync(copyQuery);
+                    await InsertOrUpdateDataAsync(sourceConn, schema, sourceTable, backupTable);
                 }
                 catch (PostgresException ex) when (ex.SqlState.StartsWith("23"))
                 {
@@ -344,28 +331,43 @@ public class DataService(IConfiguration config)
                 }
 
                 // Creating primary key for backup table
-                Console.WriteLine($"The data has been inserted to the table: {backupTable}. Creating Primary Key...");
+                _logger.LogInformation($"Adding primary key to {backupTable}...");
                 try
                 {
-                    await sourceConn.ExecuteAsync(PKQuery);
+                    await sourceConn.ExecuteAsync(pkQuery);
+                }
+                catch (PostgresException ex) when (ex.SqlState.StartsWith("23"))
+                {
+                    throw new DataIntegrityViolationException("Failed to add primary key to backup table.", ex);
+                }
+                    _logger.LogInformation($"The backup table for {sourceTable} has been successfully created");
+            }
+            else
+            {
+                bool hasPk = await CheckPrimaryKeyExistsAsync(sourceConn, schema, backupTable);
+                if (!hasPk)
+                {
+                    _logger.LogInformation($"Adding missing primary key to {backupTable}...");
+                    try
+                    {
+                        await sourceConn.ExecuteAsync(pkQuery);
+                    }
+                    catch (PostgresException ex) when (ex.SqlState.StartsWith("23"))
+                    {
+                        throw new DataIntegrityViolationException("Failed to add primary key to existing backup table.", ex);
+                    }
+                }
+                _logger.LogInformation($"Updating existing data in {backupTable}...");
+                try
+                {
+                    await InsertOrUpdateDataAsync(sourceConn, schema, sourceTable, backupTable);
                 }
                 catch (PostgresException ex) when (ex.SqlState.StartsWith("23"))
                 {
                     throw new DataIntegrityViolationException("Data integrity violation occured while insertin data into the target table", ex);
                 }
-                Console.WriteLine($"The backup table for {sourceTable} has been successfully created");
             }
-
-            // Inserting data to table
-            Console.WriteLine($"The table {backupTable} exists. Updating...");
-            try
-            {
-                await sourceConn.ExecuteAsync(copyQuery);
-            }
-            catch (PostgresException ex) when (ex.SqlState.StartsWith("23"))
-            {
-                throw new DataIntegrityViolationException("Data integrity violation occured while insertin data into the target table", ex);
-            }
+            _logger.LogInformation($"Backup for {sourceTable} completed successfully.");
         }
         catch (PostgresException ex) when (ex.SqlState == "42P01")
         {
@@ -373,11 +375,11 @@ public class DataService(IConfiguration config)
         }
     }
 
-    // Tokenize table with selected columns
-    public async Task TokenizeTable(string sourceConnection, string sourceTable, List<string> columns, int maxAllowedRows = 100000)
+    // Tokenize and Detokenize
+    public async Task ProcessTableAsync(string sourceConnection, string sourceTable, List<string> columns, bool isTokenized, int maxAllowedRows = 100000)
     {
         // Validate connection string
-        ValidateConnectionString(sourceConnection);
+        _validationService.ValidateConnectionString(sourceConnection);
 
         // Ensure the "id" column is always present for update reference.
         if (!columns.Any(c => string.Equals(c, "id", StringComparison.OrdinalIgnoreCase)))
@@ -398,29 +400,27 @@ public class DataService(IConfiguration config)
         }
 
         var selectedColumns = string.Join(", ", columns);
-        Console.WriteLine($"The selected columns are {selectedColumns}");
-
+        _logger.LogInformation($"The selected columns are {selectedColumns}");
         var selectQuery = $"SELECT {selectedColumns} FROM {sourceTable}";
+
         try
         {
             var users = await sourceConn.QueryAsync<dynamic>(selectQuery);
-
-            foreach (var user in users)
+            foreach (var row in users)
             {
                 // dictionary
-                var userDict = user as IDictionary<string, object>;
-
+                var rowDict = row as IDictionary<string, object>;
                 foreach (var field in _encryptedFields)
                 {
                     // check if columns are available
-                    if (columns.Any(c => string.Equals(c, field, StringComparison.OrdinalIgnoreCase)) && userDict.ContainsKey(field))
+                    if (columns.Contains(field, StringComparer.OrdinalIgnoreCase) && rowDict.ContainsKey(field))
                     {
-                        var curr = userDict[field]?.ToString();
-                        if (!string.IsNullOrEmpty(curr) && !IsEncrypted(curr))
+                        var value = rowDict[field]?.ToString();
+                        if (!string.IsNullOrEmpty(value))
                         {
                             try
                             {
-                                userDict[field] = Encrypt(curr);
+                                rowDict[field] = isTokenized ? _encryptionService.Decrypt(value) : _encryptionService.Encrypt(value);
                             }
                             catch (CryptographicException ex)
                             {
@@ -436,7 +436,7 @@ public class DataService(IConfiguration config)
 
                 try
                 {
-                    await sourceConn.ExecuteAsync(updateQuery, userDict);
+                    await sourceConn.ExecuteAsync(updateQuery, rowDict);
                 }
                 catch (PostgresException ex) when (ex.SqlState.StartsWith("23"))
                 {
@@ -450,79 +450,5 @@ public class DataService(IConfiguration config)
         }
     }
 
-    // Detokenize whole table
-    public async Task DetokenizeTable(string sourceConnection, string sourceTable, List<string> columns, int maxAllowedRows = 100000)
-    {
-        // Validate connection string
-        ValidateConnectionString(sourceConnection);
-
-        if (!columns.Any(c => string.Equals(c, "id", StringComparison.OrdinalIgnoreCase)))
-        {
-            columns.Add("id");
-        }
-
-        using var sourceConn = new NpgsqlConnection(sourceConnection);
-
-        // Check row count first to simulate large data volume handling
-        var countQuery = $"SELECT COUNT(*) FROM \"public\".\"{sourceTable}\"";
-        int rowCount = await sourceConn.ExecuteScalarAsync<int>(countQuery);
-
-        if (rowCount > maxAllowedRows)
-        {
-            throw new LargeDataVolumeException(
-                $"The table '{sourceTable}' has {rowCount} rows which exceeds the maximum allowed {maxAllowedRows} for a single transfer operation.");
-        }
-
-        var selectedColumns = string.Join(", ", columns);
-        Console.WriteLine($"The selected columns are {selectedColumns}");
-
-        var selectQuery = $"SELECT {selectedColumns} FROM {sourceTable}";
-
-        try
-        {
-            var users = await sourceConn.QueryAsync<dynamic>(selectQuery);
-
-            foreach (var user in users)
-            {
-                var userDict = user as IDictionary<string, object>;
-
-                foreach (var field in _encryptedFields)
-                {
-                    // check if columns are available
-                    if (columns.Any(c => string.Equals(c, field, StringComparison.OrdinalIgnoreCase)) && userDict.ContainsKey(field))
-                    {
-                        var curr = userDict[field]?.ToString();
-                        if (!string.IsNullOrEmpty(curr) && IsEncrypted(curr))
-                        {
-                            try
-                            {
-                                userDict[field] = Decrypt(curr);
-                            }
-                            catch (CryptographicException ex)
-                            {
-                                throw new AlgorithmIncapibilitiesException("Encryption failed due to incompatible algorithm or key", ex);
-                            }
-                        }
-                    }
-                }
-                // dynamic set clause for update query
-                var setClause = string.Join(", ", columns.Where(c => !string.Equals(c, "id", StringComparison.OrdinalIgnoreCase)).Select(c => $"{c} = @{c}"));
-                var updateQuery = $"UPDATE {sourceTable} SET {setClause} WHERE id = @id";
-
-                try
-                {
-                    await sourceConn.ExecuteAsync(updateQuery, userDict);
-                }
-                catch (PostgresException ex) when (ex.SqlState.StartsWith("23"))
-                {
-                    throw new DataIntegrityViolationException("Data integrity violation occured while insertin data into the target table", ex);
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            throw new InvalidColumnException("The selected column does not exist.", ex);
-        }
-    }
-
+    #endregion
 }

@@ -1,5 +1,6 @@
 ﻿using System.Security.Cryptography;
 using System.Text;
+using Microsoft.EntityFrameworkCore.Metadata.Internal;
 
 namespace AplikasiNew.Services
 {
@@ -16,17 +17,19 @@ namespace AplikasiNew.Services
 
         public EncryptionService(IConfiguration config)
         {
-            var keyString = config["EncryptionKey"];
-            var ivString = config["EncryptionIV"];
-
+            var keyString = Environment.GetEnvironmentVariable("ENCRYPTION_KEY") ?? throw new Exception("ENCRYPTION_KEY not set");
+            Console.WriteLine($"The key is {keyString}");
+            var ivString = Environment.GetEnvironmentVariable("ENCRYPTION_IV") ?? throw new Exception("ENCRYPTION_IV not set");
+            Console.WriteLine($"The IV is {ivString}");
             if (string.IsNullOrWhiteSpace(keyString))
                 throw new ArgumentException("EncryptionKey is missing or empty in configuration.");
 
             if (string.IsNullOrWhiteSpace(ivString))
                 throw new ArgumentException("EncryptionIV is missing or empty in configuration.");
 
-            _key = Encoding.UTF8.GetBytes(keyString);
-            _iv = Encoding.UTF8.GetBytes(ivString);
+            _key = Convert.FromBase64String(keyString);
+            _iv = Convert.FromBase64String(ivString);
+            Console.WriteLine($"Key length: {_key.Length}, IV length: {_iv.Length}");
 
             if (_key.Length != 32)
                 throw new ArgumentException("EncryptionKey must be 32 bytes (256 bits) for AES-256.");
@@ -41,8 +44,19 @@ namespace AplikasiNew.Services
 
         public string Encrypt(string plainText)
         {
+            Console.WriteLine($"[Encrypt] Called with input: {plainText}");
             if (string.IsNullOrEmpty(plainText))
+            {
+                Console.WriteLine("[Encrypt] Skipped — input is null or empty.");
                 return plainText;
+            }
+            if (IsEncrypted(plainText))
+    {
+        Console.WriteLine("[Encrypt] Skipped — already encrypted.");
+        return plainText;
+    }
+
+            Console.WriteLine("[Encrypt] Proceeding with encryption...");
 
             int lengthToEncrypt = (int)Math.Ceiling(plainText.Length * 0.6);
             string partToEncrypt = plainText.Substring(0, lengthToEncrypt);
@@ -61,7 +75,10 @@ namespace AplikasiNew.Services
                     byte[] encryptedBytes = encryptor.TransformFinalBlock(plainBytes, 0, plainBytes.Length);
                     string encryptedPart = Convert.ToBase64String(encryptedBytes);
 
-                    return $"{encryptedPart}:{remainingPart}";
+                    string final = $"{encryptedPart}:{remainingPart}";
+                    Console.WriteLine($"Encrypted result: {final}");
+                    return final;
+
                 }
             }
         }

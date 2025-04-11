@@ -10,16 +10,10 @@ using System.Threading.Tasks;
 
 namespace AplikasiNew.Middleware
 {
-    public class ProblemDetailsMiddleware
+    public class ProblemDetailsMiddleware(RequestDelegate next, ILogger<ProblemDetails>? logger)
     {
-        private readonly RequestDelegate _next;
-        private readonly ILogger<ProblemDetails> _logger;
-
-        public ProblemDetailsMiddleware(RequestDelegate next, ILogger<ProblemDetails>? logger)
-        {
-            _next = next;
-            _logger = logger;
-        }
+        private readonly RequestDelegate _next = next;
+        private readonly ILogger<ProblemDetails> _logger = logger;
 
         private async Task HandleProblem(HttpContext context, Exception ex, string title, string type, int statusCode, string errorCode)
         {

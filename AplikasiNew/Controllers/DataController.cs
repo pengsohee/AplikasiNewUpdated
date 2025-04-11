@@ -63,7 +63,7 @@ public class DataController : ControllerBase
         }
 
         await _dataService.TransferTable(request.SourceConnectionString, request.TargetConnectionString, request.SourceTable, request.TargetTable, request.Columns);
-        return Ok(new { message = "Data has been transferred" });
+        return Ok(new { message = "The target table is up to date." });
     }
 
     [HttpPut("tokenize-table")]
@@ -74,7 +74,7 @@ public class DataController : ControllerBase
             return BadRequest(new { error = "Token group and source are required" });
         }
 
-        await _dataService.TokenizeTable(request.SourceConnectionString, request.SourceTable, request.Columns);
+        await _dataService.ProcessTableAsync(request.SourceConnectionString, request.SourceTable, request.Columns, isTokenized: false);
         return Ok(new { message = "Data successfully tokenized!" });
     }
 
@@ -86,7 +86,7 @@ public class DataController : ControllerBase
             return BadRequest(new { error = "Token group and source are required" });
         }
 
-        await _dataService.DetokenizeTable(request.SourceConnectionString,request.SourceTable, request.Columns);
+        await _dataService.ProcessTableAsync(request.SourceConnectionString,request.SourceTable, request.Columns, isTokenized: true);
         return Ok(new { message = "Data successfully detokenized!" });
     }
 
